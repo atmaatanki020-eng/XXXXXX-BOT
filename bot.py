@@ -23,11 +23,7 @@ from telegram.ext import (
 # BOT_TOKEN = your BotFather token
 #
 # TELEGRAM_BOT_TOKEN ko fallback ke roop mein bhi support kiya hai.
-BOT_TOKEN = (
-    os.getenv("8742750136:AAFy6kTxycv_CuAe3zdpzLVAUa2tTmxmWSE")
-    or os.getenv("TELEGRAM_BOT_TOKEN")
-    or ""
-).strip()
+BOT_TOKEN = "8742750136:AAFy6kTxycv_CuAe3zdpzLVAUa2tTmxmWSE"
 
 MAX_FILE_SIZE = 50 * 1024 * 1024
 
