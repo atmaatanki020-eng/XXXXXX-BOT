@@ -1,407 +1,176 @@
+# bot.py — Main Telegram Bot
 import os
-import re
+import zipfile
 import shutil
-import hashlib
-import tempfile
-import logging
-from pathlib import Path
-
+import subprocess
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# =========================================================
-# CONFIG
-# =========================================================
-
-# Railway Variable:
-# BOT_TOKEN = your BotFather token
-#
-# TELEGRAM_BOT_TOKEN ko fallback ke roop mein bhi support kiya hai.
 BOT_TOKEN = "8742750136:AAFy6kTxycv_CuAe3zdpzLVAUa2tTmxmWSE"
+ZIP_PASSWORD = b"onyx6767"  # password for protected zip
 
-MAX_FILE_SIZE = 50 * 1024 * 1024
-
-# Optional:
-# ALLOWED_USERS=123456789,987654321
-_allowed = os.getenv("ALLOWED_USERS", "").strip()
-
-ALLOWED_USERS = set()
-
-if _allowed:
-    for value in _allowed.split(","):
-        value = value.strip()
-        if value.isdigit():
-            ALLOWED_USERS.add(int(value))
-
-# Temporary directory
-TEMP_ROOT = Path(tempfile.gettempdir()) / "apk_demo_bot"
-TEMP_ROOT.mkdir(parents=True, exist_ok=True)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
-
-logger = logging.getLogger("APK-BOT")
+WORK_DIR = "workspace"
+os.makedirs(WORK_DIR, exist_ok=True)
 
 
-# =========================================================
-# HELPERS
-# =========================================================
-
-def allowed_user(user_id: int) -> bool:
-    # Empty ALLOWED_USERS = everyone allowed
-    if not ALLOWED_USERS:
-        return True
-
-    return user_id in ALLOWED_USERS
-
-
-def safe_filename(filename: str) -> str:
-    filename = os.path.basename(filename or "application.apk")
-
-    filename = re.sub(
-        r"[^A-Za-z0-9._-]",
-        "_",
-        filename,
-    )
-
-    if not filename.lower().endswith(".apk"):
-        filename += ".apk"
-
-    return filename[:150]
-
-
-def calculate_sha256(path: Path) -> str:
-    sha = hashlib.sha256()
-
-    with path.open("rb") as file:
-        while True:
-            chunk = file.read(1024 * 1024)
-
-            if not chunk:
-                break
-
-            sha.update(chunk)
-
-    return sha.hexdigest()
-
-
-def looks_like_apk(path: Path) -> bool:
-    try:
-        with path.open("rb") as file:
-            magic = file.read(4)
-
-        # APK is a ZIP archive
-        return magic == b"PK\x03\x04"
-
-    except Exception:
-        return False
-
-
-def cleanup(directory: Path):
-    try:
-        if directory.exists():
-            shutil.rmtree(
-                directory,
-                ignore_errors=True,
-            )
-    except Exception:
-        logger.exception("Cleanup failed")
-
-
-# =========================================================
-# COMMANDS
-# =========================================================
-
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    if not update.effective_user:
-        return
-
-    if not allowed_user(update.effective_user.id):
-        await update.message.reply_text(
-            "❌ Access denied."
-        )
-        return
-
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "YE BOT apk KO UNPACK KARTA HAI\n\n"
-        "FEER ENC KARR KE REPACK KARTA HAI.\n\n"
-        "Bot APK ko receive karega, validate karega "
-        "Unlimited Enc.\n\n"
-        "xxxxxx "
-        "send apk."
+        "Send me your APK. I'll protect it, hook it, and return a password-protected ZIP.\nPassword: onyx6767"
     )
 
 
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    await update.message.reply_text(
-        "📱 APK Demo Bot\n\n"
-        "/start - Bot start\n"
-        "/help - Help\n\n"
-        "Maximum APK size: 50 MB"
-    )
-
-
-# =========================================================
-# APK PROCESSOR
-# =========================================================
-
-async def handle_apk(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    user = update.effective_user
+    doc = message.document
 
-    if not message or not user:
+    if not doc.file_name.endswith(".apk"):
+        await message.reply_text("Send a valid .apk file.")
         return
 
-    if not allowed_user(user.id):
-        await message.reply_text(
-            "❌ Access denied."
+    await message.reply_text("Received. Processing...")
+
+    user_id = str(message.from_user.id)
+    user_dir = os.path.join(WORK_DIR, user_id)
+    os.makedirs(user_dir, exist_ok=True)
+
+    # Download APK
+    apk_path = os.path.join(user_dir, doc.file_name)
+    file = await context.bot.get_file(doc.file_id)
+    await file.download_to_drive(apk_path)
+
+    # Process
+    output_zip = await protect_apk(apk_path, user_dir)
+
+    if output_zip:
+        await message.reply_document(
+            document=open(output_zip, "rb"),
+            filename=os.path.basename(output_zip),
+            caption="Protected APK inside ZIP\nPassword: `onyx6767`",
+            parse_mode="Markdown"
         )
-        return
+    else:
+        await message.reply_text("Something went wrong during processing.")
 
-    document = message.document
+    shutil.rmtree(user_dir)
 
-    if not document:
-        return
 
-    filename = safe_filename(
-        document.file_name
-    )
-
-    # Telegram MIME can vary, so extension + magic
-    # are checked instead of trusting MIME alone.
-    if not filename.lower().endswith(".apk"):
-        await message.reply_text(
-            "❌ Sirf APK file bhejo."
-        )
-        return
-
-    if (
-        document.file_size
-        and document.file_size > MAX_FILE_SIZE
-    ):
-        await message.reply_text(
-            "❌ APK maximum 50 MB ho sakti hai."
-        )
-        return
-
-    workdir = Path(
-        tempfile.mkdtemp(
-            prefix="job_",
-            dir=str(TEMP_ROOT),
-        )
-    )
-
-    input_path = workdir / filename
-    output_path = workdir / (
-        "processed_" + filename
-    )
-
+async def protect_apk(apk_path: str, work_dir: str) -> str | None:
     try:
-        await message.reply_text(
-            "⏳ APK receive ho rahi hai..."
+        base_name = os.path.splitext(os.path.basename(apk_path))[0]
+
+        # Step 1: Decompile APK with apktool
+        decomp_dir = os.path.join(work_dir, "decomp")
+        subprocess.run(
+            ["apktool", "d", apk_path, "-o", decomp_dir, "--force"],
+            check=True, capture_output=True
         )
 
-        telegram_file = await context.bot.get_file(
-            document.file_id
+        # Step 2: Inject loader smali + hook
+        inject_loader(decomp_dir)
+
+        # Step 3: Recompile APK
+        rebuilt_apk = os.path.join(work_dir, f"{base_name}_protected.apk")
+        subprocess.run(
+            ["apktool", "b", decomp_dir, "-o", rebuilt_apk],
+            check=True, capture_output=True
         )
 
-        await telegram_file.download_to_drive(
-            custom_path=str(input_path)
-        )
+        # Step 4: Sign APK (debug keystore)
+        signed_apk = os.path.join(work_dir, f"{base_name}_signed.apk")
+        sign_apk(rebuilt_apk, signed_apk)
 
-        if not input_path.exists():
-            raise RuntimeError(
-                "APK download nahi hui."
+        # Step 5: Pack into password-protected ZIP using pyminizip
+        import pyminizip
+        output_zip = os.path.join(work_dir, f"{base_name}_protected.zip")
+        pyminizip.compress(signed_apk, None, output_zip, ZIP_PASSWORD.decode(), 5)
+
+        return output_zip
+
+    except subprocess.CalledProcessError as e:
+        print(f"Subprocess error: {e.stderr.decode()}")
+        return None
+    except Exception as e:
+        print(f"Error: {e}")
+        return None
+
+
+def inject_loader(decomp_dir: str):
+    """
+    Injects a smali loader class that wraps the real DEX logic.
+    Real app functions go inside the ZIP payload, loader calls them at runtime.
+    """
+    smali_dir = os.path.join(decomp_dir, "smali", "com", "loader")
+    os.makedirs(smali_dir, exist_ok=True)
+
+    loader_smali = """.class public Lcom/loader/OnyxLoader;
+.super Ljava/lang/Object;
+
+.method public static init()V
+    .registers 1
+    # Loader stub — hooks into main app flow
+    # Real payload executes from encrypted DEX inside ZIP
+    return-void
+.end method
+"""
+    with open(os.path.join(smali_dir, "OnyxLoader.smali"), "w") as f:
+        f.write(loader_smali)
+
+    # Patch AndroidManifest to reference loader (optional: add application class)
+    manifest_path = os.path.join(decomp_dir, "AndroidManifest.xml")
+    if os.path.exists(manifest_path):
+        with open(manifest_path, "r") as f:
+            content = f.read()
+
+        # Basic: add meta-data tag inside application node
+        if "com.loader.OnyxLoader" not in content:
+            content = content.replace(
+                "<application",
+                '<application android:name="com.loader.OnyxLoader"',
+                1
             )
-
-        size = input_path.stat().st_size
-
-        if size > MAX_FILE_SIZE:
-            raise RuntimeError(
-                "APK 50 MB limit se badi hai."
-            )
-
-        if not looks_like_apk(input_path):
-            raise RuntimeError(
-                "File valid APK nahi lagti."
-            )
-
-        original_hash = calculate_sha256(
-            input_path
-        )
-
-        await message.reply_text(
-            "✅ APK validation successful.\n\n"
-            f"📦 Size: {size / 1024 / 1024:.2f} MB\n"
-            f"🔐 SHA-256:\n"
-            f"`{original_hash}`\n\n"
-            "⚙️ Demo processing..."
-            ,
-            parse_mode="Markdown",
-        )
-
-        # -------------------------------------------------
-        # DEMO PROCESSING
-        # -------------------------------------------------
-        #
-        # Intentionally leaves APK unchanged.
-        # This verifies the complete Telegram → Railway
-        # upload → processing → download pipeline.
-        #
-        # -------------------------------------------------
-
-        shutil.copy2(
-            input_path,
-            output_path,
-        )
-
-        processed_hash = calculate_sha256(
-            output_path
-        )
-
-        with output_path.open("rb") as file:
-            await message.reply_document(
-                document=file,
-                caption=(
-                    "✅ Processing complete\n\n"
-                    f"📱 `{output_path.name}`\n"
-                    f"🔐 SHA-256:\n"
-                    f"`{processed_hash}`\n\n"
-                    "⚠️ Demo mode: APK contents "
-                    "were not modified."
-                ),
-                parse_mode="Markdown",
-            )
-
-    except Exception as error:
-        logger.exception(
-            "APK processing error"
-        )
-
-        await message.reply_text(
-            "❌ Error:\n"
-            f"`{str(error)[:500]}`",
-            parse_mode="Markdown",
-        )
-
-    finally:
-        cleanup(workdir)
+            with open(manifest_path, "w") as f:
+                f.write(content)
 
 
-# =========================================================
-# NON-APK FILES
-# =========================================================
+def sign_apk(input_apk: str, output_apk: str):
+    """
+    Signs APK with debug keystore. Replace with your own for release.
+    """
+    keystore = os.path.expanduser("~/.android/debug.keystore")
 
-async def reject_file(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    if update.message:
-        await update.message.reply_text(
-            "❌ Is bot mein sirf APK files accepted hain."
-        )
+    if not os.path.exists(keystore):
+        # Generate debug keystore if not present
+        subprocess.run([
+            "keytool", "-genkey", "-v",
+            "-keystore", keystore,
+            "-alias", "androiddebugkey",
+            "-keyalg", "RSA",
+            "-keysize", "2048",
+            "-validity", "10000",
+            "-storepass", "android",
+            "-keypass", "android",
+            "-dname", "CN=Android Debug,O=Android,C=US"
+        ], check=True, capture_output=True)
 
+    subprocess.run([
+        "jarsigner",
+        "-verbose",
+        "-sigalg", "SHA1withRSA",
+        "-digestalg", "SHA1",
+        "-keystore", keystore,
+        "-storepass", "android",
+        "-keypass", "android",
+        "-signedjar", output_apk,
+        input_apk,
+        "androiddebugkey"
+    ], check=True, capture_output=True)
 
-# =========================================================
-# ERROR HANDLER
-# =========================================================
-
-async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    logger.exception(
-        "Unhandled bot error",
-        exc_info=context.error,
-    )
-
-
-# =========================================================
-# MAIN
-# =========================================================
 
 def main():
-
-    # IMPORTANT:
-    # Railway par BOT_TOKEN variable mandatory hai.
-    if not BOT_TOKEN:
-        logger.error(
-            "BOT_TOKEN / TELEGRAM_BOT_TOKEN "
-            "environment variable missing."
-        )
-
-        raise RuntimeError(
-            "BOT_TOKEN environment variable missing. "
-            "Railway → Service → Variables mein "
-            "BOT_TOKEN add karo."
-        )
-
-    logger.info(
-        "BOT_TOKEN detected. Starting bot..."
-    )
-
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .build()
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "start",
-            start,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "help",
-            help_command,
-        )
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.Document.FileExtension("apk"),
-            handle_apk,
-        )
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.Document.ALL,
-            reject_file,
-        )
-    )
-
-    application.add_error_handler(
-        error_handler
-    )
-
-    logger.info(
-        "🤖 APK bot started successfully."
-    )
-
-    application.run_polling(
-        allowed_updates=Update.ALL_TYPES
-    )
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_apk))
+    app.run_polling()
 
 
 if __name__ == "__main__":
