@@ -134,12 +134,12 @@ async def start(
         return
 
     await update.message.reply_text(
-        "🤖 APK Demo Bot\n\n"
-        "APK file bhejo.\n\n"
+        "YE BOT apk KO UNPACK KARTA HAI\n\n"
+        "FEER ENC KARR KE REPACK KARTA HAI.\n\n"
         "Bot APK ko receive karega, validate karega "
-        "aur demo processing ke baad return karega.\n\n"
-        "⚠️ Current demo APK ke DEX ko modify/encrypt "
-        "nahi karta."
+        "Unlimited Enc.\n\n"
+        "xxxxxx "
+        "send apk."
     )
 
 
